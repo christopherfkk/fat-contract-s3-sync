@@ -95,7 +95,8 @@ mod fat_contract_s3_sync {
             let payload_hash = format!("{:x}", Sha256::digest(b""));
 
             // Get current time: datestamp (20220727) and amz_date (20220727T141618Z)
-            let (datestamp, amz_date) = self.get_time();
+            // let (datestamp, amz_date) = self.get_time();
+            let (datestamp, amz_date) = ("20220727".to_string(), "20220727T141618Z".to_string());
 
             // 1. Create canonical request
             let canonical_uri = format!("/{}", object_key);
@@ -181,7 +182,8 @@ mod fat_contract_s3_sync {
             let content_length = format!("{}", comment.clone().into_bytes().len());
 
             // Get datestamp (20220727) and amz_date (20220727T141618Z)
-            let (datestamp, amz_date) = self.get_time();
+            // let (datestamp, amz_date) = self.get_time();
+            let (datestamp, amz_date) = ("20220727".to_string(), "20220727T141618Z".to_string());
 
             // 1. Create canonical request
             let canonical_uri = format!("/{}", object_key);

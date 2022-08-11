@@ -39,6 +39,11 @@ std = [
     "ink_primitives/std",
     "scale/std",
     "scale-info/std",
-    "pink-extension/std"
+    "pink-extension/std",
+    "chrono/std",
+    "sha2/std",
+    "ink_prelude/std",
+    "hmac/std",
+    "hex/std"
 ]
 ink-as-dependency = []
