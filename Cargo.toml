@@ -22,6 +22,8 @@ sha2 = { version = "0.10.2", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
 base16 = { version = "0.2.1", default-features = false, features = ["alloc"] }
 chrono = { version = "=0.4.19", default-features = false, features = ["alloc"] }
+aes-gcm-siv = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+cipher = { version = "0.4.3", default-features = false }
 
 [lib]
 name = "fat_contract_s3_sync"

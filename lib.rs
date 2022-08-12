@@ -14,6 +14,7 @@ mod fat_contract_s3_sync {
     use ink_env::debug_println;
     // use scale::{Decode, Encode};
 
+    // To make HTTP request
     use pink::{http_get, PinkEnvironment};
 
     // To generate AWS4 Signature
@@ -23,6 +24,12 @@ mod fat_contract_s3_sync {
 
     // To format block timestamp for http request headers
     use chrono::{TimeZone, Utc};
+
+    // To encrypt/decrypt HTTP payloads
+    use aes_gcm_siv::aead::{Aead, KeyInit, Nonce};
+    use aes_gcm_siv::Aes256GcmSiv;
+    use pink::chain_extension::signing;
+    use cipher::{consts::{U12, U32}, generic_array::GenericArray};
 
     // Wrap PUT request in macro
     macro_rules! http_put {
@@ -70,12 +77,6 @@ mod fat_contract_s3_sync {
         pub fn seal_aws_credentials(&mut self, access_key_aws: String, secret_key_aws: String) -> () {
             self.access_key_aws = access_key_aws;
             self.secret_key_aws = secret_key_aws;
-        }
-
-        #[ink(message)]
-        pub fn seal_4everland_credentials(&mut self, access_key_4everland: String, secret_key_4everland: String) -> () {
-            self.access_key_4everland = access_key_4everland;
-            self.secret_key_4everland = secret_key_4everland;
         }
 
         pub fn get_time(&self) -> (String, String) {
@@ -145,7 +146,6 @@ mod fat_contract_s3_sync {
             // 19700101/ap-southeast-1/s3/aws4_request
             // ec70fa653b4f867cda7a59007db15a7e95ed45d70bacdfb55902a2fb09b6367f
 
-
             // 3. Calculate signature
             let signature_key = get_signature_key(
                 self.secret_key_aws.as_bytes(),
@@ -159,7 +159,6 @@ mod fat_contract_s3_sync {
             //  ----- Signature -----
             // 485e174a7fed1691de34f116a968981709ed5a00f4975470bd3d0dd06ccd3e1d
 
-
             // 4. Create authorization header
             let authorization_header = format!("{} Credential={}/{}, SignedHeaders={}, Signature={}",
                                                algorithm,
@@ -172,7 +171,6 @@ mod fat_contract_s3_sync {
             //  ----- Authorization header -----
             // Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/19700101/ap-southeast-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=485e174a7fed1691de34f116a968981709ed5a00f4975470bd3d0dd06ccd3e1d
 
-
             let headers: Vec<(String, String)> = vec![
                 ("Host".into(), host.to_string()),
                 ("Authorization".into(), authorization_header.clone()),
@@ -182,20 +180,40 @@ mod fat_contract_s3_sync {
             // Make HTTP GET request
             let request_url = format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key);
             let response = http_get!(request_url, headers);
-            let result = String::from_utf8_lossy(&response.body);
 
-            result.to_string()
+            // Generate key and nonce
+            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes());
+            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
+            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
+
+            // Decrypt payload
+            let cipher = Aes256GcmSiv::new(key.into());
+            let plaintext = cipher.decrypt(&nonce, response.body.as_ref());
+            let result = format!("{}", String::from_utf8_lossy(&plaintext.unwrap()));
+
+            result
         }
 
         #[ink(message)]
         pub fn put_s3_object(&self, object_key: String, bucket_name: String, region: String, payload: String) -> String {
 
+            // Generate key and nonce
+            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes());
+            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
+            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
+
+            // Encrypt payload
+            let cipher = Aes256GcmSiv::new(key.into());
+            let ciphertext: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
+
             // Set request values
             let method = "PUT";
             let service = "s3";
             let host = format!("{}.s3.amazonaws.com", bucket_name);
-            let payload_hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
-            let content_length = format!("{}", payload.clone().into_bytes().len());
+            let payload_hash = format!("{:x}", Sha256::digest(&ciphertext));
+            let content_length = format!("{}", ciphertext.clone().len());
 
             // Get datestamp (20220727) and amz_date (20220727T141618Z)
             let (datestamp, amz_date) = self.get_time();
@@ -224,8 +242,6 @@ mod fat_contract_s3_sync {
             //
             // host;x-amz-content-sha256;x-amz-date
             // 505f2ec6d688d6e15f718b5c91edd07c45310e08e8c221018a7c0f103515fa28
-
-
 
             // 2. Create string to sign
             let algorithm = "AWS4-HMAC-SHA256";
@@ -257,7 +273,6 @@ mod fat_contract_s3_sync {
             //  ----- Signature -----
             // 84bf2db9f7a0007f5124cf2e9c0e1b7e1cec2b1b1b209ab9458387caa3b8da52
 
-
             // 4. Create authorization header
             let authorization_header = format!("{} Credential={}/{},SignedHeaders={},Signature={}",
                                                algorithm,
@@ -284,7 +299,13 @@ mod fat_contract_s3_sync {
         }
 
         #[ink(message)]
-        pub fn get_4everland_object(&self, object_key: String, bucket_name: String) -> String {
+        pub fn seal_4everland_credentials(&mut self, access_key_4everland: String, secret_key_4everland: String) -> () {
+            self.access_key_4everland = access_key_4everland;
+            self.secret_key_4everland = secret_key_4everland;
+        }
+
+        #[ink(message)]
+        pub fn get_4everland_object(&self, object_key: String, bucket_name: String) -> Vec<u8> {
 
             // Set request values
             let method = "GET";
@@ -328,8 +349,6 @@ mod fat_contract_s3_sync {
             let signature_bytes = hmac_sign(&signature_key, &string_to_sign.as_bytes());
             let signature = format!("{}", base16::encode_lower(&signature_bytes));
 
-            debug_println!(" -- Signature -- \n{}\n", &signature);
-
             // 4. Create authorization header
             let authorization_header = format!("{} Credential={}/{}, SignedHeaders={}, Signature={}",
                                                algorithm,
@@ -347,9 +366,8 @@ mod fat_contract_s3_sync {
             // Make HTTP GET request
             let request_url = format!("https://endpoint.4everland.co/{}/{}", bucket_name, object_key);
             let response = http_get!(request_url, headers);
-            let result = String::from_utf8_lossy(&response.body);
 
-            result.to_string()
+            response.body.to_vec()
         }
 
         #[ink(message)]
@@ -398,8 +416,6 @@ mod fat_contract_s3_sync {
             let signature_bytes = hmac_sign(&signature_key, &string_to_sign.as_bytes());
             let signature = format!("{}", base16::encode_lower(&signature_bytes));
 
-            debug_println!(" -- Signature -- \n{}\n", &signature);
-
             // 4. Create authorization header
             let authorization_header = format!("{} Credential={}/{}, SignedHeaders={}, Signature={}",
                                                algorithm,
@@ -428,7 +444,7 @@ mod fat_contract_s3_sync {
 
     // Returns encrypted hex bytes of key and message using SHA256
     pub fn hmac_sign (key: &[u8], msg: &[u8]) -> Vec<u8> {
-        let mut mac = HmacSha256::new_from_slice(key).expect("Could not instantiate HMAC instance");
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("Could not instantiate HMAC instance");
         mac.update(msg);
         let result = mac.finalize().into_bytes().to_vec();
         result
@@ -445,10 +461,7 @@ mod fat_contract_s3_sync {
 
     #[cfg(test)]
     mod tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
         use super::*;
-
-        /// Imports `ink_lang` so we can use `#[ink::test]`.
         use ink_lang as ink;
 
         #[ink::test]
@@ -465,11 +478,11 @@ mod fat_contract_s3_sync {
 
             let mut contract = FatContractS3Sync::new();
             contract.seal_aws_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
-            let response = contract.get_s3_object(
+            let response = contract.put_s3_object(
                 "test/api-upload".to_string(),
                 "fat-contract-s3-sync".to_string(),
-                "ap-southeast-1".to_string());
-                // "This is a test comment".to_string());
+                "ap-southeast-1".to_string(),
+                "This is a test comment".to_string());
             assert_eq!(response, "200\nOK\nSuccess");
         }
 
