@@ -12,7 +12,7 @@ mod fat_contract_s3_sync {
     use ink_prelude::format;
     use ink_env;
     use ink_env::debug_println;
-    // use scale::{Decode, Encode};
+    use scale::{Decode, Encode};
 
     // To make HTTP request
     use pink::{http_get, PinkEnvironment};
@@ -30,6 +30,7 @@ mod fat_contract_s3_sync {
     use aes_gcm_siv::Aes256GcmSiv;
     use pink::chain_extension::signing;
     use cipher::{consts::{U12, U32}, generic_array::GenericArray};
+    use base16;
 
     // Wrap PUT request in macro
     macro_rules! http_put {
@@ -60,6 +61,14 @@ mod fat_contract_s3_sync {
         secret_key_aws: String,
         access_key_4everland: String,
         secret_key_4everland: String,
+    }
+
+    #[derive(Encode, Decode, Debug, PartialEq, Eq, Copy, Clone)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum Error {
+        RequestFailed,
+        EncryptionFailed,
+        DecryptionFailed
     }
 
     impl FatContractS3Sync {
@@ -93,7 +102,7 @@ mod fat_contract_s3_sync {
         }
 
         #[ink(message)]
-        pub fn get_s3_object(&self, object_key: String, bucket_name: String, region: String) -> String {
+        pub fn get_s3_object(&self, object_key: String, bucket_name: String, region: String) -> Result<String, Error> {
 
             // Set request values
             let method = "GET";
@@ -181,25 +190,29 @@ mod fat_contract_s3_sync {
             let request_url = format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key);
             let response = http_get!(request_url, headers);
 
+            if response.status_code != 200 {
+                return Err(Error::RequestFailed);
+            }
+
             // Generate key and nonce
-            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes());
+            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
             let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
+            let nonce_bytes: Vec<u8> = vec![0; 12];
             let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
 
             // Decrypt payload
             let cipher = Aes256GcmSiv::new(key.into());
-            let plaintext = cipher.decrypt(&nonce, response.body.as_ref());
+            let plaintext = cipher.decrypt(&nonce, response.body.as_ref()).or(Err(Error::DecryptionFailed));
             let result = format!("{}", String::from_utf8_lossy(&plaintext.unwrap()));
 
-            result
+            Ok(result)
         }
 
         #[ink(message)]
-        pub fn put_s3_object(&self, object_key: String, bucket_name: String, region: String, payload: String) -> String {
+        pub fn put_s3_object(&self, object_key: String, bucket_name: String, region: String, payload: String) -> Result<(), Error> {
 
             // Generate key and nonce
-            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes());
+            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
             let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
             let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
             let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
@@ -295,7 +308,12 @@ mod fat_contract_s3_sync {
 
             let request_url = format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key);
             let response = http_put!(request_url, payload, headers);
-            format!("{}\n{}\n{}", response.status_code, response.reason_phrase, String::from_utf8_lossy(&response.body))
+
+            if response.status_code != 200 {
+                return Err(Error::RequestFailed);
+            }
+
+            Ok(())
         }
 
         #[ink(message)]
@@ -305,7 +323,7 @@ mod fat_contract_s3_sync {
         }
 
         #[ink(message)]
-        pub fn get_4everland_object(&self, object_key: String, bucket_name: String) -> Vec<u8> {
+        pub fn get_4everland_object(&self, object_key: String, bucket_name: String) -> Result<String, Error> {
 
             // Set request values
             let method = "GET";
@@ -367,19 +385,45 @@ mod fat_contract_s3_sync {
             let request_url = format!("https://endpoint.4everland.co/{}/{}", bucket_name, object_key);
             let response = http_get!(request_url, headers);
 
-            response.body.to_vec()
+            if response.status_code != 200 {
+                return Err(Error::RequestFailed);
+            }
+
+            // Generate key and nonce
+            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
+            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
+            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
+
+            // Decrypt payload
+            let cipher = Aes256GcmSiv::new(key.into());
+            let decrypted_bytes: Result<Vec<u8>, Error> = cipher.decrypt(&nonce, response.body.as_ref())
+                .or(Err(Error::DecryptionFailed));
+            let result = format!("{}", String::from_utf8_lossy(&decrypted_bytes.unwrap()));
+
+            Ok(result)
         }
 
         #[ink(message)]
-        pub fn put_4everland_object(&self, object_key: String, bucket_name: String, payload: String) -> String {
+        pub fn put_4everland_object(&self, object_key: String, bucket_name: String, payload: String) -> Result<(), Error> {
+
+            // Generate key and nonce
+            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
+            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
+            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
+
+            // Encrypt payload
+            let cipher = Aes256GcmSiv::new(key.into());
+            let encrypted_bytes: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
 
             // Set request values
             let method = "PUT";
             let service = "s3";
             let region = "us-east-1"; // default for 4everland
             let host = "endpoint.4everland.co"; // bucket name not included unlike s3
-            let payload_hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
-            let content_length = format!("{}", payload.clone().into_bytes().len());
+            let payload_hash = format!("{:x}", Sha256::digest(&encrypted_bytes));
+            let content_length = format!("{}", &encrypted_bytes.len());
 
             // Get current time: datestamp (e.g. 20220727) and amz_date (e.g. 20220727T141618Z)
             let (datestamp, amz_date) = self.get_time();
@@ -434,8 +478,13 @@ mod fat_contract_s3_sync {
 
             // Make HTTP PUT request
             let request_url = format!("https://endpoint.4everland.co/{}/{}", bucket_name, object_key);
-            let response = http_put!(request_url, payload, headers);
-            format!("{}\n{}\n{}", response.status_code, response.reason_phrase, String::from_utf8_lossy(&response.body))
+            let response = http_put!(request_url, encrypted_bytes, headers);
+
+            if response.status_code != 200 {
+                return Err(Error::RequestFailed);
+            }
+
+            Ok(())
         }
     }
 
@@ -446,8 +495,8 @@ mod fat_contract_s3_sync {
     pub fn hmac_sign (key: &[u8], msg: &[u8]) -> Vec<u8> {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("Could not instantiate HMAC instance");
         mac.update(msg);
-        let result = mac.finalize().into_bytes().to_vec();
-        result
+        let result = mac.finalize().into_bytes();
+        result.to_vec()
     }
 
     // Returns the signature key for the complicated version
@@ -464,47 +513,70 @@ mod fat_contract_s3_sync {
         use super::*;
         use ink_lang as ink;
 
+        // #[ink::test]
+        // fn put_s3_object_works() {
+        //     pink_extension_runtime::mock_ext::mock_all_ext();
+        //
+        //     let mut contract = FatContractS3Sync::new();
+        //     contract.seal_aws_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
+        //     let response = contract.put_s3_object(
+        //         "test/api-upload".to_string(),
+        //         "fat-contract-s3-sync".to_string(),
+        //         "ap-southeast-1".to_string(),
+        //         "This is a test comment".to_string());
+        //     debug_println!("{:?}", response);
+        //     // assert_eq!(response, "200\nOK\nSuccess");
+        //     assert!(false)
+        // }
+
+        // #[ink::test]
+        // fn put_4everland_object_works() {
+        //     use pink_extension::chain_extension::{mock, HttpResponse};
+        //
+        //     mock::mock_http_request(|request| {
+        //         if request.url == "https://endpoint.4everland.co/fat-contract-4everland-sync/test/api-upload" {
+        //             HttpResponse::ok(b"Success".to_vec())
+        //         } else {
+        //             HttpResponse::not_found()
+        //         }
+        //     });
+        //
+        //     let mut contract = FatContractS3Sync::new();
+        //     contract.seal_4everland_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
+        //     let response = contract.put_4everland_object(
+        //         "test/api-upload".to_string(),
+        //         "fat-contract-4everland-sync".to_string(),
+        //         "This is a test comment".to_string());
+        //     assert_eq!(response, "200\nOK\nSuccess");
+        // }
+
         #[ink::test]
-        fn put_s3_object_works() {
-            use pink_extension::chain_extension::{mock, HttpResponse};
+        fn aead_works() {
 
-            mock::mock_http_request(|request| {
-                if request.url == "https://fat-contract-s3-sync.s3.ap-southeast-1.amazonaws.com/test/api-upload" {
-                    HttpResponse::ok(b"Success".to_vec())
-                } else {
-                    HttpResponse::not_found()
-                }
-            });
+            let payload = "test";
 
-            let mut contract = FatContractS3Sync::new();
-            contract.seal_aws_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
-            let response = contract.put_s3_object(
-                "test/api-upload".to_string(),
-                "fat-contract-s3-sync".to_string(),
-                "ap-southeast-1".to_string(),
-                "This is a test comment".to_string());
-            assert_eq!(response, "200\nOK\nSuccess");
-        }
+            // Generate key and nonce
+            let key_bytes: Vec<u8> = vec![0; 32];
+            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+            let nonce_bytes: Vec<u8> = vec![0; 12];
+            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
 
-        #[ink::test]
-        fn put_4everland_object_works() {
-            use pink_extension::chain_extension::{mock, HttpResponse};
+            // Encrypt payload
+            let cipher = Aes256GcmSiv::new(key.into());
+            let encrypted_text: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
 
-            mock::mock_http_request(|request| {
-                if request.url == "https://endpoint.4everland.co/fat-contract-4everland-sync/test/api-upload" {
-                    HttpResponse::ok(b"Success".to_vec())
-                } else {
-                    HttpResponse::not_found()
-                }
-            });
+            // Generate key and nonce
+            let key_bytes: Vec<u8> = vec![0; 32];
+            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+            let nonce_bytes: Vec<u8> = vec![0; 12];
+            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
 
-            let mut contract = FatContractS3Sync::new();
-            contract.seal_4everland_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
-            let response = contract.put_4everland_object(
-                "test/api-upload".to_string(),
-                "fat-contract-4everland-sync".to_string(),
-                "This is a test comment".to_string());
-            assert_eq!(response, "200\nOK\nSuccess");
+            // Decrypt payload
+            let cipher = Aes256GcmSiv::new(key.into());
+            let decrypted_text = cipher.decrypt(&nonce, encrypted_text.as_ref()).unwrap();
+
+            assert_eq!(payload.as_bytes(), decrypted_text);
+            assert_eq!(payload, String::from_utf8_lossy(&decrypted_text));
         }
     }
 }
