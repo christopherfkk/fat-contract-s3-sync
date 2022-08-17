@@ -6,7 +6,7 @@ After setting up your [s3](https://aws.amazon.com/s3/)  or [4everland](https://w
 1. The demo safely seals the API credentials in the contract storage, thanks to the privacy-protecting Phala Blockchain that encrypts transactions and states by default.
 2. For both s3 and 4eveland (s3-API-compatible), the AWS4 signature added to the authorization header in the HTTP request is manually calculated. You can check the [general signing process](https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html) and the [specific signing requirements](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html) for s3. 
 > **_NOTE:_** Although a [Rust SDK for aws](https://github.com/awslabs/aws-sdk-rust) is in development , the ink! contract does not support the `async` functions that most API SDKs use in awaiting HTTP responses.
-3. The demo encrypts and decrypts the data to be stored before uploading and downloading from the storage service, using RustCrypto’s AEAD crate. You can customize the process (e.g. algorithm, choice of key/nonce) by referencing here (https://github.com/RustCrypto/AEADs). 
+3. The demo encrypts and decrypts the data to be stored before uploading and downloading from the storage service, using RustCrypto’s AEAD crate. You can customize the process (e.g. algorithm, choice of key/nonce) by referencing [here](https://github.com/RustCrypto/AEADs). 
 
 
 ### Performance
