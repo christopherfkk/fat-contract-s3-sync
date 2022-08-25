@@ -57,10 +57,8 @@ mod fat_contract_s3_sync {
     #[ink(storage)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub struct FatContractS3Sync {
-        access_key_aws: String,
-        secret_key_aws: String,
-        access_key_4everland: String,
-        secret_key_4everland: String,
+        access_key: String,
+        secret_key: String
     }
 
     #[derive(Encode, Decode, Debug, PartialEq, Eq, Copy, Clone)]
@@ -68,24 +66,24 @@ mod fat_contract_s3_sync {
     pub enum Error {
         RequestFailed,
         EncryptionFailed,
-        DecryptionFailed
+        DecryptionFailed,
+        PlatformNotFound,
+        CredentialsNotSealed
     }
 
     impl FatContractS3Sync {
         #[ink(constructor)]
         pub fn new() -> Self {
             Self {
-                access_key_aws: "Not Sealed".to_string(),
-                secret_key_aws: "Not Sealed".to_string(),
-                access_key_4everland: "Not Sealed".to_string(),
-                secret_key_4everland: "Not Sealed".to_string(),
+                access_key: "Not Sealed".to_string(),
+                secret_key: "Not Sealed".to_string()
             }
         }
 
         #[ink(message)]
-        pub fn seal_aws_credentials(&mut self, access_key_aws: String, secret_key_aws: String) -> () {
-            self.access_key_aws = access_key_aws;
-            self.secret_key_aws = secret_key_aws;
+        pub fn seal_credentials(&mut self, access_key: String, secret_key: String) -> () {
+            self.access_key = access_key;
+            self.secret_key = secret_key;
         }
 
         pub fn get_time(&self) -> (String, String) {
@@ -101,20 +99,43 @@ mod fat_contract_s3_sync {
             (datestamp, datetimestamp)
         }
 
+        /// HTTP GETs and decrypts the data from the specified storage platform.
+        /// Must seal the correct credentials before calling this function
         #[ink(message)]
-        pub fn get_s3_object(&self, object_key: String, bucket_name: String, region: String) -> Result<String, Error> {
+        pub fn get_object(&self, platform: String, object_key: String, bucket_name: String, region: Option<String>) -> Result<String, Error> {
+
+            if self.access_key == "Not Sealed" || self.secret_key == "Not Sealed" {
+                return Err(Error::CredentialsNotSealed)
+            }
 
             // Set request values
             let method = "GET";
             let service = "s3";
-            let host = format!("{}.s3.amazonaws.com", bucket_name);
+            let region = region.unwrap_or(String::from("us-east-1"));
+
+            let host = if platform == "s3" {
+               format!("{}.s3.amazonaws.com", bucket_name)
+            } else if platform == "4everland" {
+               "endpoint.4everland.co".to_string()
+            } else if platform == "storj" {
+                "gateway.storjshare.io".to_string()
+            } else if platform == "filebase" {
+                "s3.filebase.com".to_string()
+            } else {
+                return Err(Error::PlatformNotFound)
+            };
+
             let payload_hash = format!("{:x}", Sha256::digest(b"")); // GET has default payload empty byte
 
             // Get current time: datestamp (e.g. 20220727) and amz_date (e.g. 20220727T141618Z)
             let (datestamp, amz_date) = self.get_time();
 
             // 1. Create canonical request
-            let canonical_uri = format!("/{}", object_key);
+            let canonical_uri: String = if platform == "s3" {
+                format!("/{}", object_key)
+            } else {
+                format!("/{}/{}", bucket_name, object_key)
+            };
             let canonical_querystring = "";
             let canonical_headers = format!("host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n", host, payload_hash, amz_date);
             let signed_headers = "host;x-amz-content-sha256;x-amz-date";
@@ -157,7 +178,7 @@ mod fat_contract_s3_sync {
 
             // 3. Calculate signature
             let signature_key = get_signature_key(
-                self.secret_key_aws.as_bytes(),
+                self.secret_key.as_bytes(),
                 &datestamp.as_bytes(),
                 &region.as_bytes(),
                 &service.as_bytes());
@@ -171,7 +192,7 @@ mod fat_contract_s3_sync {
             // 4. Create authorization header
             let authorization_header = format!("{} Credential={}/{}, SignedHeaders={}, Signature={}",
                                                algorithm,
-                                               self.access_key_aws,
+                                               self.access_key,
                                                credential_scope,
                                                signed_headers,
                                                signature);
@@ -187,7 +208,11 @@ mod fat_contract_s3_sync {
                 ("x-amz-date".into(), amz_date)];
 
             // Make HTTP GET request
-            let request_url = format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key);
+            let request_url: String = if platform == "s3" {
+                format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key)
+            } else {
+                format!("https://{}/{}/{}", host, bucket_name, object_key)
+            };
             let response = http_get!(request_url, headers);
 
             if response.status_code != 200 {
@@ -197,42 +222,65 @@ mod fat_contract_s3_sync {
             // Generate key and nonce
             let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
             let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = vec![0; 12];
+            let nonce_bytes: Vec<u8> = self.access_key.as_bytes()[..12].to_vec();
             let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
 
             // Decrypt payload
             let cipher = Aes256GcmSiv::new(key.into());
-            let plaintext = cipher.decrypt(&nonce, response.body.as_ref()).or(Err(Error::DecryptionFailed));
-            let result = format!("{}", String::from_utf8_lossy(&plaintext.unwrap()));
+            let decrypted_byte = cipher.decrypt(&nonce, response.body.as_ref()).or(Err(Error::DecryptionFailed));
+            let result = format!("{}", String::from_utf8_lossy(&decrypted_byte.unwrap()));
 
             Ok(result)
         }
 
+        /// Encrypts and HTTP PUTs the data to the specified storage platform as byte stream.
+        /// Must seal the correct credentials before calling this function.
         #[ink(message)]
-        pub fn put_s3_object(&self, object_key: String, bucket_name: String, region: String, payload: String) -> Result<(), Error> {
+        pub fn put_object(&self, platform: String, object_key: String, bucket_name: String, region: String, payload: String) -> Result<String, Error> {
+
+            if self.access_key == "Not Sealed" || self.secret_key == "Not Sealed" {
+                return Err(Error::CredentialsNotSealed)
+            }
 
             // Generate key and nonce
             let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
             let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
+            let nonce_bytes: Vec<u8> = self.access_key.as_bytes()[..12].to_vec();
             let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
 
             // Encrypt payload
             let cipher = Aes256GcmSiv::new(key.into());
-            let ciphertext: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
+            let encrypted_bytes: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
 
             // Set request values
             let method = "PUT";
             let service = "s3";
-            let host = format!("{}.s3.amazonaws.com", bucket_name);
-            let payload_hash = format!("{:x}", Sha256::digest(&ciphertext));
-            let content_length = format!("{}", ciphertext.clone().len());
+            // let region = region.unwrap_or(String::from("us-east-1"));
+
+            let host = if platform == "s3" {
+               format!("{}.s3.amazonaws.com", bucket_name)
+            } else if platform == "4everland" {
+               "endpoint.4everland.co".to_string()
+            } else if platform == "storj" {
+                "gateway.storjshare.io".to_string()
+            } else if platform == "filebase" {
+                "s3.filebase.com".to_string()
+            } else {
+                return Err(Error::PlatformNotFound)
+            };
+
+            let payload_hash = format!("{:x}", Sha256::digest(&encrypted_bytes));
+            let content_length = format!("{}", encrypted_bytes.clone().len());
 
             // Get datestamp (20220727) and amz_date (20220727T141618Z)
             let (datestamp, amz_date) = self.get_time();
 
             // 1. Create canonical request
-            let canonical_uri = format!("/{}", object_key);
+            let canonical_uri: String = if platform == "s3" {
+                format!("/{}", object_key)
+            } else {
+                format!("/{}/{}", bucket_name, object_key)
+            };
             let canonical_querystring = "";
             let canonical_headers = format!("host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n", host, payload_hash, amz_date);
             let signed_headers = "host;x-amz-content-sha256;x-amz-date";
@@ -275,7 +323,7 @@ mod fat_contract_s3_sync {
 
             // 3. Calculate signature
             let signature_key = get_signature_key(
-                self.secret_key_aws.as_bytes(),
+                self.secret_key.as_bytes(),
                 &datestamp.as_bytes(),
                 &region.as_bytes(),
                 &service.as_bytes());
@@ -289,7 +337,7 @@ mod fat_contract_s3_sync {
             // 4. Create authorization header
             let authorization_header = format!("{} Credential={}/{},SignedHeaders={},Signature={}",
                                                algorithm,
-                                               self.access_key_aws,
+                                               self.access_key,
                                                credential_scope,
                                                signed_headers,
                                                signature);
@@ -298,193 +346,27 @@ mod fat_contract_s3_sync {
             //  ----- Authorization header -----
             // Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/19700101/ap-southeast-1/s3/aws4_request,SignedHeaders=host;x-amz-content-sha256;x-amz-date,Signature=b9b6bcb29b1369678e3a3cfae411a5277c084c8c1796bb6e78407f402f9e3f3d
 
+            let request_url: String = if platform == "s3" {
+                format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key)
+            } else {
+                format!("https://{}/{}/{}", host, bucket_name, object_key)
+            };
+
             let headers: Vec<(String, String)> = vec![
-                ("Host".into(), host.to_string()),
+                ("Host".into(), host),
                 ("Authorization".into(), authorization_header),
                 ("Content-Length".into(), content_length),
                 ("Content-Type".into(), "binary/octet-stream".into()),
                 ("x-amz-content-sha256".into(), payload_hash),
                 ("x-amz-date".into(), amz_date)];
 
-            let request_url = format!("https://{}.s3.{}.amazonaws.com/{}", bucket_name, region, object_key);
-            let response = http_put!(request_url, payload, headers);
-
-            if response.status_code != 200 {
-                return Err(Error::RequestFailed);
-            }
-
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn seal_4everland_credentials(&mut self, access_key_4everland: String, secret_key_4everland: String) -> () {
-            self.access_key_4everland = access_key_4everland;
-            self.secret_key_4everland = secret_key_4everland;
-        }
-
-        #[ink(message)]
-        pub fn get_4everland_object(&self, object_key: String, bucket_name: String) -> Result<String, Error> {
-
-            // Set request values
-            let method = "GET";
-            let service = "s3";
-            let region = "us-east-1"; // default for 4everland
-            let host = "endpoint.4everland.co"; // bucket name not included unlike s3
-            let payload_hash = format!("{:x}", Sha256::digest(b"")); // GET has default payload empty byte
-
-            // Get current time: datestamp (e.g. 20220727) and amz_date (e.g. 20220727T141618Z)
-            let (datestamp, amz_date) = self.get_time();
-
-            // 1. Create canonical request
-            let canonical_uri = format!("/{}/{}", bucket_name, object_key); // bucket name included unlike s3
-            let canonical_querystring = "";
-            let canonical_headers = format!("host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n", host, payload_hash, amz_date);
-            let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-            let canonical_request = format!("{}\n{}\n{}\n{}\n{}\n{}",
-                                        method,
-                                        canonical_uri,
-                                        canonical_querystring,
-                                        canonical_headers,
-                                        signed_headers,
-                                        payload_hash);
-
-            // 2. Create "String to sign"
-            let algorithm = "AWS4-HMAC-SHA256";
-            let credential_scope = format!("{}/{}/{}/aws4_request", datestamp, region, service);
-            let canonical_request_hash = format!("{:x}", Sha256::digest(&canonical_request.as_bytes()));
-            let string_to_sign = format!("{}\n{}\n{}\n{}",
-                                         algorithm,
-                                         amz_date,
-                                         credential_scope,
-                                         canonical_request_hash);
-
-            // 3. Calculate signature
-            let signature_key = get_signature_key(
-                self.secret_key_4everland.as_bytes(),
-                &datestamp.as_bytes(),
-                &region.as_bytes(),
-                &service.as_bytes());
-            let signature_bytes = hmac_sign(&signature_key, &string_to_sign.as_bytes());
-            let signature = format!("{}", base16::encode_lower(&signature_bytes));
-
-            // 4. Create authorization header
-            let authorization_header = format!("{} Credential={}/{}, SignedHeaders={}, Signature={}",
-                                               algorithm,
-                                               self.access_key_4everland,
-                                               credential_scope,
-                                               signed_headers,
-                                               signature);
-
-            let headers: Vec<(String, String)> = vec![
-                ("Host".into(), host.to_string()),
-                ("Authorization".into(), authorization_header.clone()),
-                ("x-amz-content-sha256".into(), payload_hash),
-                ("x-amz-date".into(), amz_date)];
-
-            // Make HTTP GET request
-            let request_url = format!("https://endpoint.4everland.co/{}/{}", bucket_name, object_key);
-            let response = http_get!(request_url, headers);
-
-            if response.status_code != 200 {
-                return Err(Error::RequestFailed);
-            }
-
-            // Generate key and nonce
-            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
-            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
-            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
-
-            // Decrypt payload
-            let cipher = Aes256GcmSiv::new(key.into());
-            let decrypted_bytes: Result<Vec<u8>, Error> = cipher.decrypt(&nonce, response.body.as_ref())
-                .or(Err(Error::DecryptionFailed));
-            let result = format!("{}", String::from_utf8_lossy(&decrypted_bytes.unwrap()));
-
-            Ok(result)
-        }
-
-        #[ink(message)]
-        pub fn put_4everland_object(&self, object_key: String, bucket_name: String, payload: String) -> Result<(), Error> {
-
-            // Generate key and nonce
-            let key_bytes: Vec<u8> = signing::derive_sr25519_key(object_key.as_bytes())[..32].to_vec();
-            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = self.access_key_4everland.as_bytes()[..12].to_vec();
-            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
-
-            // Encrypt payload
-            let cipher = Aes256GcmSiv::new(key.into());
-            let encrypted_bytes: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
-
-            // Set request values
-            let method = "PUT";
-            let service = "s3";
-            let region = "us-east-1"; // default for 4everland
-            let host = "endpoint.4everland.co"; // bucket name not included unlike s3
-            let payload_hash = format!("{:x}", Sha256::digest(&encrypted_bytes));
-            let content_length = format!("{}", &encrypted_bytes.len());
-
-            // Get current time: datestamp (e.g. 20220727) and amz_date (e.g. 20220727T141618Z)
-            let (datestamp, amz_date) = self.get_time();
-
-            // 1. Create canonical request
-            let canonical_uri = format!("/{}/{}", bucket_name, object_key); // bucket name included unlike s3
-            let canonical_querystring = "";
-            let canonical_headers = format!("host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n", host, payload_hash, amz_date);
-            let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-            let canonical_request = format!("{}\n{}\n{}\n{}\n{}\n{}",
-                                        method,
-                                        canonical_uri,
-                                        canonical_querystring,
-                                        canonical_headers,
-                                        signed_headers,
-                                        payload_hash);
-
-            // 2. Create "String to sign"
-            let algorithm = "AWS4-HMAC-SHA256";
-            let credential_scope = format!("{}/{}/{}/aws4_request", datestamp, region, service);
-            let canonical_request_hash = format!("{:x}", Sha256::digest(&canonical_request.as_bytes()));
-            let string_to_sign = format!("{}\n{}\n{}\n{}",
-                                         algorithm,
-                                         amz_date,
-                                         credential_scope,
-                                         canonical_request_hash);
-
-            // 3. Calculate signature
-            let signature_key = get_signature_key(
-                self.secret_key_4everland.as_bytes(),
-                &datestamp.as_bytes(),
-                &region.as_bytes(),
-                &service.as_bytes());
-            let signature_bytes = hmac_sign(&signature_key, &string_to_sign.as_bytes());
-            let signature = format!("{}", base16::encode_lower(&signature_bytes));
-
-            // 4. Create authorization header
-            let authorization_header = format!("{} Credential={}/{}, SignedHeaders={}, Signature={}",
-                                               algorithm,
-                                               self.access_key_4everland,
-                                               credential_scope,
-                                               signed_headers,
-                                               signature);
-
-            let headers: Vec<(String, String)> = vec![
-                ("Host".into(), host.to_string()),
-                ("Authorization".into(), authorization_header),
-                ("Content-Length".into(), content_length),
-                ("Content-Type".into(), "binary/octet-stream".into()),
-                ("x-amz-content-sha256".into(), payload_hash),
-                ("x-amz-date".into(), amz_date)];
-
-            // Make HTTP PUT request
-            let request_url = format!("https://endpoint.4everland.co/{}/{}", bucket_name, object_key);
             let response = http_put!(request_url, encrypted_bytes, headers);
 
-            if response.status_code != 200 {
-                return Err(Error::RequestFailed);
-            }
+            // if response.status_code != 200 {
+            //     return Err(Error::RequestFailed);
+            // }
 
-            Ok(())
+            Ok(format!("{}\n{}\n{}\n{:?}", response.status_code, response.reason_phrase, String::from_utf8_lossy(&response.body), response.headers))
         }
     }
 
@@ -514,27 +396,11 @@ mod fat_contract_s3_sync {
         use ink_lang as ink;
 
         // #[ink::test]
-        // fn put_s3_object_works() {
-        //     pink_extension_runtime::mock_ext::mock_all_ext();
-        //
-        //     let mut contract = FatContractS3Sync::new();
-        //     contract.seal_aws_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
-        //     let response = contract.put_s3_object(
-        //         "test/api-upload".to_string(),
-        //         "fat-contract-s3-sync".to_string(),
-        //         "ap-southeast-1".to_string(),
-        //         "This is a test comment".to_string());
-        //     debug_println!("{:?}", response);
-        //     // assert_eq!(response, "200\nOK\nSuccess");
-        //     assert!(false)
-        // }
-
-        // #[ink::test]
-        // fn put_4everland_object_works() {
+        // fn put_object_works() {
         //     use pink_extension::chain_extension::{mock, HttpResponse};
         //
         //     mock::mock_http_request(|request| {
-        //         if request.url == "https://endpoint.4everland.co/fat-contract-4everland-sync/test/api-upload" {
+        //         if request.url == "https://s3.filebase.com/fat-contract-filebase-sync/test/api-upload" {
         //             HttpResponse::ok(b"Success".to_vec())
         //         } else {
         //             HttpResponse::not_found()
@@ -542,41 +408,43 @@ mod fat_contract_s3_sync {
         //     });
         //
         //     let mut contract = FatContractS3Sync::new();
-        //     contract.seal_4everland_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
-        //     let response = contract.put_4everland_object(
+        //     contract.seal_credentials("AKIAIOSFODNN7EXAMPLE".to_string(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string());
+        //     let response = contract.put_object(
+        //         "filebase".to_string(),
         //         "test/api-upload".to_string(),
-        //         "fat-contract-4everland-sync".to_string(),
+        //         "fat-contract-filebase-sync".to_string(),
+        //         "us-east-1".to_string(),
         //         "This is a test comment".to_string());
-        //     assert_eq!(response, "200\nOK\nSuccess");
+        //     assert!(false);
         // }
-
-        #[ink::test]
-        fn aead_works() {
-
-            let payload = "test";
-
-            // Generate key and nonce
-            let key_bytes: Vec<u8> = vec![0; 32];
-            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = vec![0; 12];
-            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
-
-            // Encrypt payload
-            let cipher = Aes256GcmSiv::new(key.into());
-            let encrypted_text: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
-
-            // Generate key and nonce
-            let key_bytes: Vec<u8> = vec![0; 32];
-            let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
-            let nonce_bytes: Vec<u8> = vec![0; 12];
-            let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
-
-            // Decrypt payload
-            let cipher = Aes256GcmSiv::new(key.into());
-            let decrypted_text = cipher.decrypt(&nonce, encrypted_text.as_ref()).unwrap();
-
-            assert_eq!(payload.as_bytes(), decrypted_text);
-            assert_eq!(payload, String::from_utf8_lossy(&decrypted_text));
-        }
+        //
+        // #[ink::test]
+        // fn aead_works() {
+        //
+        //     let payload = "test";
+        //
+        //     // Generate key and nonce
+        //     let key_bytes: Vec<u8> = vec![0; 32];
+        //     let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+        //     let nonce_bytes: Vec<u8> = vec![0; 12];
+        //     let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
+        //
+        //     // Encrypt payload
+        //     let cipher = Aes256GcmSiv::new(key.into());
+        //     let encrypted_text: Vec<u8> = cipher.encrypt(nonce, payload.as_bytes().as_ref()).unwrap();
+        //
+        //     // Generate key and nonce
+        //     let key_bytes: Vec<u8> = vec![0; 32];
+        //     let key: &GenericArray<u8, U32> = GenericArray::from_slice(&key_bytes);
+        //     let nonce_bytes: Vec<u8> = vec![0; 12];
+        //     let nonce: &GenericArray<u8, U12> = Nonce::<Aes256GcmSiv>::from_slice(&nonce_bytes);
+        //
+        //     // Decrypt payload
+        //     let cipher = Aes256GcmSiv::new(key.into());
+        //     let decrypted_text = cipher.decrypt(&nonce, encrypted_text.as_ref()).unwrap();
+        //
+        //     assert_eq!(payload.as_bytes(), decrypted_text);
+        //     assert_eq!(payload, String::from_utf8_lossy(&decrypted_text));
+        // }
     }
 }
