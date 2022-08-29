@@ -1,7 +1,7 @@
 This demo shows how to connect Phala's Fat Contract to external storage services, both centralized (Amazon s3) and decentralized (Arweave/Filecoin through 4everland, Storj, Filebase).
 
 ### Background
-This satisfies many general usages, where Phala provides the computing power and any storage services with a RESTful API provides the data storage. We can use the native HTTP request support in Fat Contract to connect them. 
+In order to build Web3 programs, Phala Network provides the web3 computing power and any storage services (web2 or web3) with a RESTful API provides the data storage. To do this, we can use the native HTTP request support in Fat Contract to connect them. 
 
 ### Setup
 The demo shows the `GET` and `PUT` request for the Amazon S3 API. The same authentication and request process can be applied to others like 4everland, Storj, and Filebase, since the S3 API is the industrial standard for storage interfaces.
