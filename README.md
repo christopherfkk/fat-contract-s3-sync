@@ -1,6 +1,21 @@
-This demo shows how to connect to external centralized (Amazon s3) and decentralized (Arweave through 4everland) storage services using Phala Fat Contract’s HTTP request capabilities. This satisfies many general usages, where Phala provides the computing power and any storage services with a RESTful API provides the data storage.
+This demo shows how to connect Phala's Fat Contract to external storage services, both centralized (Amazon s3) and decentralized (Arweave/Filecoin through 4everland, Storj, Filebase).
 
-After setting up your [s3](https://aws.amazon.com/s3/)  or [4everland](https://www.4everland.org/bucket/)  bucket and sealing your API credentials, you can reference the demo to perform simple GET and PUT operations.
+### Background
+This satisfies many general usages, where Phala provides the computing power and any storage services with a RESTful API provides the data storage. We can use the native HTTP request support in Fat Contract to connect them. 
+
+### Setup
+The demo shows the `GET` and `PUT` request for the Amazon S3 API. The same authentication and request process can be applied to others like 4everland, Storj, and Filebase, since the S3 API is the industrial standard for storage interfaces.
+
+You need to first create an account and set up a bucket on your selected storage interface, then obtain the S3 API credentials, i.e. 1) access key and 2) secret key, to seal in the contract. All interfaces have free tiers for trial.
+
+A bucket is a container for data objects. For Amazon S3, you can have up to 100 buckets but can store any number objects in a bucket. The key of the object is unqiue within the bucket. For a more detailed overview, check [here](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingBucket.html)
+
+> **_NOTE:_** For Amazon S3, you also need to select a region. Generally, a region closest to your location is preferred. For others, the default region should be set to be `us-east-1`.
+
+- [Amazon S3](https://aws.amazon.com/s3/) - 5GB 12 months free
+- [4everland](https://www.4everland.org/bucket/) - 5GB free on Filecoin IPFS and 100MB Free on Arweave
+- [Storj](https://www.storj.io/) - 150GB free
+- [Filebase](https://filebase.com/) - 5GB free
 
 ### Details
 1. The demo safely seals the API credentials in the contract storage, thanks to the privacy-protecting Phala Blockchain that encrypts transactions and states by default.
