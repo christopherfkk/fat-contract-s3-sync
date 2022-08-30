@@ -4,7 +4,7 @@ This demo shows how to connect Phala's Fat Contract to external storage services
 In order to build Web3 programs, Phala Network provides the web3 computing power and any storage services (web2 or web3) with a RESTful API provides the data storage. To do this, we can use the native HTTP request support in Fat Contract to connect them. 
 
 ### Setup
-The demo shows the `GET` and `PUT` request for the Amazon S3 API. The same authentication and request process can be applied to others like 4everland, Storj, and Filebase, since the S3 API is the industrial standard for storage interfaces.
+The demo shows the `GET` and `PUT` request for the Amazon S3 API. The same authentication and request process can be applied to other services like 4everland, Storj, and Filebase, since the S3 API has become the industrial standard for storage interfaces. The only change then is to specify the correct host in the HTTP request (and correspondingly in the signing process), and use the correct S3 API credentials.
 
 You need to first create an account and set up a bucket on your selected storage interface, then obtain the S3 API credentials, i.e. 1) access key and 2) secret key, to seal in the contract. All interfaces have free tiers for trial.
 
