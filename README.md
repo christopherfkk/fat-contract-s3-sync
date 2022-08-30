@@ -13,16 +13,15 @@ A bucket is a container for data objects. For Amazon S3, you can have up to 100 
 > **_NOTE:_** For Amazon S3, you also need to select a region. Generally, a region closest to your location is preferred. For others, the default region should be set to be `us-east-1`.
 
 - [Amazon S3](https://aws.amazon.com/s3/) - 5GB 12 months free
-- [4everland](https://www.4everland.org/bucket/) - 5GB free on Filecoin IPFS and 100MB Free on Arweave
+- [4everland](https://www.4everland.org/bucket/) - 5GB free on IPFS and 100MB Free on Arweave
 - [Storj](https://www.storj.io/) - 150GB free
 - [Filebase](https://filebase.com/) - 5GB free
 
 ### Details
 1. The demo safely seals the API credentials in the contract storage, thanks to the privacy-protecting Phala Blockchain that encrypts transactions and states by default.
-2. For both s3 and 4eveland (s3-API-compatible), the AWS4 signature added to the authorization header in the HTTP request is manually calculated. You can check the [general signing process](https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html) and the [specific signing requirements](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html) for s3. 
+2. For all the above storage services, the AWS4 signature added to the authorization header in the HTTP request is manually assembled. You can check the [general signing process](https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html) and the [specific signing requirements](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html) for 3. 
 > **_NOTE:_** Although a [Rust SDK for aws](https://github.com/awslabs/aws-sdk-rust) is in development , the ink! contract does not support the `async` functions that most API SDKs use in awaiting HTTP responses.
 3. The demo encrypts and decrypts the data to be stored before uploading and downloading from the storage service, using RustCrypto’s AEAD crate. You can customize the process (e.g. algorithm, choice of key/nonce) by referencing [here](https://github.com/RustCrypto/AEADs). 
-
 
 ### Performance
 
@@ -34,4 +33,4 @@ This means the HTTP request is made in a fully-functional off-chain execution en
 - Maximum object size for a multi-part PUT operation: 5TB
 - Maximum object size for a single GET operation: 5TB
 
-For details of other API action limits, you can check for [s3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html) and for [4everland](https://docs.4everland.org/bucket-api/#limits-of-s3-api).
+For details of other API action limits, you can check for [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html) and for [4everland](https://docs.4everland.org/bucket-api/#limits-of-s3-api).
